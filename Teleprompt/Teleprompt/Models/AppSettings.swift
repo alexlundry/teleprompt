@@ -13,6 +13,7 @@ class AppSettings: ObservableObject {
     @AppStorage("overlayHeight") var overlayHeight: Double = 200
     @AppStorage("highlightCurrentLine") var highlightCurrentLine: Bool = true
     @AppStorage("mirrorText") var mirrorText: Bool = false
+    @AppStorage("voiceTrackingEnabled") var voiceTrackingEnabled: Bool = false
 
     var textColor: Color {
         get { Color(hex: textColorHex) ?? .white }

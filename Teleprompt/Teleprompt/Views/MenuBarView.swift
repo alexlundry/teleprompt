@@ -8,7 +8,9 @@ struct MenuBarView: View {
     var onToggleOverlay: () -> Void
     var onShowEditor: () -> Void
     var onShowSettings: () -> Void
+    var onToggleVoiceTracking: (() -> Void)?
     var isOverlayVisible: Bool
+    var isVoiceTrackingActive: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -90,6 +92,24 @@ struct MenuBarView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+
+            // Voice tracking toggle
+            if settings.voiceTrackingEnabled {
+                Button {
+                    onToggleVoiceTracking?()
+                } label: {
+                    HStack {
+                        Image(systemName: isVoiceTrackingActive ? "mic.fill" : "mic.slash")
+                            .frame(width: 16)
+                            .foregroundColor(isVoiceTrackingActive ? .red : .primary)
+                        Text(isVoiceTrackingActive ? "Voice Tracking On" : "Voice Tracking Off")
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
 
             Divider()
                 .padding(.vertical, 8)

@@ -5,6 +5,8 @@ class ScrollController: ObservableObject {
     @Published var isPlaying: Bool = false
     @Published var scrollOffset: CGFloat = 0
     @Published var currentLineIndex: Int = 0
+    @Published var voiceTrackingActive: Bool = false
+    @Published var currentHighlightWordIndex: Int?
 
     private var displayLink: CVDisplayLink?
     private var lastFrameTime: CFTimeInterval = 0
@@ -13,6 +15,24 @@ class ScrollController: ObservableObject {
     // For smooth manual scrolling
     private var targetOffset: CGFloat = 0
     private var isAnimatingManualScroll: Bool = false
+
+    // Voice tracking EMA smoothing state
+    private var voiceTargetOffset: CGFloat = 0
+    private var voiceSmoothedOffset: CGFloat = 0
+    private let emaAlpha: CGFloat = 0.13  // ~350ms to 95% convergence at 60fps
+    private let minTargetChange: CGFloat = 3.0  // ignore target changes smaller than this
+
+    // Smooth highlight interpolation
+    private var targetHighlightWordIndex: Int? = nil
+    private var highlightAdvanceAccumulator: CFTimeInterval = 0
+
+    // Word position mapping (populated by OverlayContentView)
+    var wordOffsets: [Int: CGFloat] = [:]
+    var overlayHeight: CGFloat = 200
+
+    /// Called when the user manually scrolls during voice tracking, with the
+    /// approximate word index at the new scroll position.
+    var onManualScroll: ((Int) -> Void)?
 
     // Scroll speed in points per second (calculated from words per minute)
     var scrollSpeedPointsPerSecond: CGFloat {
@@ -96,15 +116,17 @@ class ScrollController: ObservableObject {
     }
 
     private func startDisplayLink() {
-        var displayLink: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
+        guard displayLink == nil else { return }
 
-        guard let link = displayLink else { return }
-        self.displayLink = link
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+
+        guard let newLink = link else { return }
+        self.displayLink = newLink
 
         let opaqueController = Unmanaged.passUnretained(self).toOpaque()
 
-        CVDisplayLinkSetOutputCallback(link, { (displayLink, inNow, inOutputTime, flagsIn, flagsOut, context) -> CVReturn in
+        CVDisplayLinkSetOutputCallback(newLink, { (displayLink, inNow, inOutputTime, flagsIn, flagsOut, context) -> CVReturn in
             guard let context = context else { return kCVReturnSuccess }
             let controller = Unmanaged<ScrollController>.fromOpaque(context).takeUnretainedValue()
 
@@ -113,7 +135,41 @@ class ScrollController: ObservableObject {
             controller.lastFrameTime = currentTime
 
             DispatchQueue.main.async {
-                if controller.isPlaying {
+                if controller.voiceTrackingActive {
+                    // Smoothly advance highlight toward target word
+                    if let target = controller.targetHighlightWordIndex,
+                       let current = controller.currentHighlightWordIndex {
+                        if current < target {
+                            controller.highlightAdvanceAccumulator += deltaTime
+                            // Advance rate scales with gap: bigger gap = faster catch-up
+                            let gap = target - current
+                            let interval = gap > 5 ? 0.04 : gap > 2 ? 0.08 : 0.12
+                            if controller.highlightAdvanceAccumulator >= interval {
+                                controller.highlightAdvanceAccumulator = 0
+                                let newIndex = current + 1
+                                controller.currentHighlightWordIndex = newIndex
+                                // Update scroll target based on interpolated highlight
+                                if let targetY = controller.wordOffsets[newIndex] {
+                                    let newTarget = max(0, targetY - controller.overlayHeight * 0.5)
+                                    if abs(newTarget - controller.voiceTargetOffset) >= controller.minTargetChange {
+                                        controller.voiceTargetOffset = newTarget
+                                    }
+                                }
+                            }
+                        } else {
+                            controller.highlightAdvanceAccumulator = 0
+                        }
+                    }
+
+                    // EMA smoothing for scroll position
+                    let diff = controller.voiceTargetOffset - controller.voiceSmoothedOffset
+                    controller.voiceSmoothedOffset += controller.emaAlpha * diff
+                    if abs(diff) < 0.5 {
+                        controller.voiceSmoothedOffset = controller.voiceTargetOffset
+                    }
+                    controller.scrollOffset = controller.voiceSmoothedOffset
+                } else if controller.isPlaying {
+                    // WPM-based scrolling
                     controller.scrollOffset += controller.scrollSpeedPointsPerSecond * CGFloat(deltaTime)
                 }
             }
@@ -121,7 +177,7 @@ class ScrollController: ObservableObject {
             return kCVReturnSuccess
         }, opaqueController)
 
-        CVDisplayLinkStart(link)
+        CVDisplayLinkStart(newLink)
     }
 
     private func stopDisplayLink() {
@@ -129,6 +185,77 @@ class ScrollController: ObservableObject {
             CVDisplayLinkStop(link)
             displayLink = nil
         }
+    }
+
+    // MARK: - Voice Tracking
+
+    func enableVoiceTracking() {
+        voiceTrackingActive = true
+        // Stop WPM-based scrolling — voice tracker drives offset now
+        isPlaying = false
+
+        // Initialize EMA state from current position
+        voiceSmoothedOffset = scrollOffset
+        voiceTargetOffset = scrollOffset
+
+        // Start display link for EMA smoothing
+        startDisplayLink()
+    }
+
+    func disableVoiceTracking() {
+        voiceTrackingActive = false
+        currentHighlightWordIndex = nil
+        targetHighlightWordIndex = nil
+        highlightAdvanceAccumulator = 0
+        stopDisplayLink()
+    }
+
+    func scrollToWordIndex(_ wordIndex: Int) {
+        guard voiceTrackingActive else { return }
+
+        targetHighlightWordIndex = wordIndex
+
+        // If highlight hasn't started yet, jump directly
+        if currentHighlightWordIndex == nil {
+            currentHighlightWordIndex = wordIndex
+        }
+        // The display link will smoothly advance currentHighlightWordIndex
+        // toward the target and update the scroll offset as it goes.
+    }
+
+    /// Manual scroll adjustment during voice tracking (arrow keys, scroll wheel).
+    /// Shifts both smoothed and target offsets so the change is immediate,
+    /// then syncs the voice tracker to the word at the new scroll position.
+    func manualAdjustWhileVoiceTracking(by delta: CGFloat) {
+        guard voiceTrackingActive else { return }
+        let adjusted = max(0, voiceSmoothedOffset + delta)
+        voiceSmoothedOffset = adjusted
+        voiceTargetOffset = adjusted
+        scrollOffset = adjusted
+
+        // Find the word index closest to the reading line position
+        let readingLineY = adjusted + overlayHeight * 0.5
+        if let wordIndex = wordIndexForOffset(readingLineY) {
+            currentHighlightWordIndex = wordIndex
+            targetHighlightWordIndex = wordIndex
+            highlightAdvanceAccumulator = 0
+            onManualScroll?(wordIndex)
+        }
+    }
+
+    /// Reverse lookup: find the word index whose Y offset is closest to (but not past) the given offset.
+    private func wordIndexForOffset(_ targetY: CGFloat) -> Int? {
+        guard !wordOffsets.isEmpty else { return nil }
+        var bestIndex: Int? = nil
+        var bestDiff: CGFloat = .greatestFiniteMagnitude
+        for (index, y) in wordOffsets {
+            let diff = abs(y - targetY)
+            if diff < bestDiff {
+                bestDiff = diff
+                bestIndex = index
+            }
+        }
+        return bestIndex
     }
 
     deinit {

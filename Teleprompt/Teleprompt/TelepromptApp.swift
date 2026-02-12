@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 @main
 struct TelepromptApp: App {
@@ -22,6 +23,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let settings = AppSettings()
     let scriptStore = ScriptStore()
     var scrollController: ScrollController!
+    let voiceTracker = VoiceTracker()
+    private var voiceTrackingCancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         scrollController = ScrollController(settings: settings)
@@ -29,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenuBar()
         setupOverlayWindow()
         setupHotkeys()
+        setupVoiceTracking()
 
         // Hide dock icon - we're a menu bar app
         NSApp.setActivationPolicy(.accessory)
@@ -46,24 +50,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover = NSPopover()
         popover?.behavior = .transient
         popover?.contentViewController = NSHostingController(
-            rootView: MenuBarView(
-                scriptStore: scriptStore,
-                settings: settings,
-                scrollController: scrollController,
-                onToggleOverlay: { [weak self] in
-                    self?.toggleOverlay()
-                    self?.popover?.close()
-                },
-                onShowEditor: { [weak self] in
-                    self?.showEditor()
-                    self?.popover?.close()
-                },
-                onShowSettings: { [weak self] in
-                    self?.showSettings()
-                    self?.popover?.close()
-                },
-                isOverlayVisible: overlayWindowController?.window?.isVisible ?? false
-            )
+            rootView: makeMenuBarView()
+        )
+    }
+
+    private func makeMenuBarView() -> MenuBarView {
+        MenuBarView(
+            scriptStore: scriptStore,
+            settings: settings,
+            scrollController: scrollController,
+            onToggleOverlay: { [weak self] in
+                self?.toggleOverlay()
+                self?.popover?.close()
+            },
+            onShowEditor: { [weak self] in
+                self?.showEditor()
+                self?.popover?.close()
+            },
+            onShowSettings: { [weak self] in
+                self?.showSettings()
+                self?.popover?.close()
+            },
+            onToggleVoiceTracking: { [weak self] in
+                self?.toggleVoiceTracking()
+                self?.popover?.close()
+            },
+            isOverlayVisible: overlayWindowController?.window?.isVisible ?? false,
+            isVoiceTrackingActive: scrollController.voiceTrackingActive
         )
     }
 
@@ -103,29 +116,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.startListening()
     }
 
+    func setupVoiceTracking() {
+        // When VoiceTracker's currentWordIndex changes, tell ScrollController
+        voiceTracker.$currentWordIndex
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] wordIndex in
+                guard let self = self,
+                      self.scrollController.voiceTrackingActive else { return }
+                self.scrollController.scrollToWordIndex(wordIndex)
+            }
+            .store(in: &voiceTrackingCancellables)
+
+        // When user manually scrolls during voice tracking, sync the voice tracker
+        scrollController.onManualScroll = { [weak self] wordIndex in
+            self?.voiceTracker.syncPosition(to: wordIndex)
+        }
+    }
+
+    func toggleVoiceTracking() {
+        if scrollController.voiceTrackingActive {
+            // Turn off
+            voiceTracker.stopListening()
+            scrollController.disableVoiceTracking()
+        } else {
+            // Re-check permissions before deciding
+            voiceTracker.checkPermissions()
+            if voiceTracker.hasAllPermissions {
+                startVoiceTracking()
+            } else {
+                // Request permissions, then start regardless
+                // (startListening will log if permissions are still missing)
+                voiceTracker.requestPermissions { [weak self] granted in
+                    self?.startVoiceTracking()
+                }
+            }
+        }
+    }
+
+    private func startVoiceTracking() {
+        // Prepare the script text for matching
+        if let content = scriptStore.selectedScript?.content {
+            voiceTracker.prepareScript(content)
+        }
+        scrollController.enableVoiceTracking()
+        voiceTracker.startListening()
+    }
+
     @objc func togglePopover() {
         guard let button = statusItem?.button else { return }
 
         // Update the view with current overlay visibility state
         popover?.contentViewController = NSHostingController(
-            rootView: MenuBarView(
-                scriptStore: scriptStore,
-                settings: settings,
-                scrollController: scrollController,
-                onToggleOverlay: { [weak self] in
-                    self?.toggleOverlay()
-                    self?.popover?.close()
-                },
-                onShowEditor: { [weak self] in
-                    self?.showEditor()
-                    self?.popover?.close()
-                },
-                onShowSettings: { [weak self] in
-                    self?.showSettings()
-                    self?.popover?.close()
-                },
-                isOverlayVisible: overlayWindowController?.window?.isVisible ?? false
-            )
+            rootView: makeMenuBarView()
         )
 
         if let popover = popover, popover.isShown {
@@ -168,7 +210,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let settingsView = SettingsView(settings: settings)
 
             settingsWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 450, height: 350),
+                contentRect: NSRect(x: 0, y: 0, width: 450, height: 380),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
@@ -184,6 +226,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        voiceTracker.stopListening()
         HotkeyManager.shared.stopListening()
         scriptStore.saveScripts()
     }

@@ -55,14 +55,40 @@ class OverlayWindow: NSWindow {
         let scrollAmount = settings.fontSize + settings.lineSpacing
 
         switch event.keyCode {
-        case 49: // Spacebar - play/pause
-            scrollController.togglePlayPause()
+        case 49: // Spacebar - play/pause (not during voice tracking)
+            if !scrollController.voiceTrackingActive {
+                scrollController.togglePlayPause()
+            }
         case 125: // Down arrow - scroll down
-            scrollController.smoothScroll(by: scrollAmount)
+            if scrollController.voiceTrackingActive {
+                scrollController.manualAdjustWhileVoiceTracking(by: scrollAmount)
+            } else {
+                scrollController.smoothScroll(by: scrollAmount)
+            }
         case 126: // Up arrow - scroll up
-            scrollController.smoothScroll(by: -scrollAmount)
+            if scrollController.voiceTrackingActive {
+                scrollController.manualAdjustWhileVoiceTracking(by: -scrollAmount)
+            } else {
+                scrollController.smoothScroll(by: -scrollAmount)
+            }
         default:
             super.keyDown(with: event)
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let scrollController = scrollController else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        // deltaY is positive when scrolling up (content moves down), negative when scrolling down
+        let delta = -event.scrollingDeltaY
+
+        if scrollController.voiceTrackingActive {
+            scrollController.manualAdjustWhileVoiceTracking(by: delta)
+        } else {
+            scrollController.adjustOffset(by: delta)
         }
     }
 }

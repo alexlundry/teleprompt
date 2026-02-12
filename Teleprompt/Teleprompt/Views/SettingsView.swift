@@ -1,4 +1,6 @@
 import SwiftUI
+import Speech
+import AVFAudio
 
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
@@ -15,13 +17,18 @@ struct SettingsView: View {
                     Label("Scrolling", systemImage: "scroll")
                 }
 
+            VoiceTrackingSettingsView(settings: settings)
+                .tabItem {
+                    Label("Voice", systemImage: "mic")
+                }
+
             ShortcutsSettingsView()
                 .tabItem {
                     Label("Shortcuts", systemImage: "keyboard")
                 }
         }
         .padding(20)
-        .frame(width: 450, height: 350)
+        .frame(width: 450, height: 380)
     }
 }
 
@@ -185,6 +192,113 @@ struct ShortcutsSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct VoiceTrackingSettingsView: View {
+    @ObservedObject var settings: AppSettings
+    @State private var speechStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
+    @State private var micGranted: Bool = (AVAudioApplication.shared.recordPermission == .granted)
+    @State private var micPromptTriggered: Bool = false
+
+    var body: some View {
+        Form {
+            Section("Voice Tracking") {
+                Toggle("Enable voice tracking", isOn: $settings.voiceTrackingEnabled)
+
+                Text("When enabled, the teleprompter scrolls automatically by listening to your voice and matching it to the script text.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Permissions") {
+                HStack {
+                    if micGranted {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Microphone access granted")
+                    } else if micPromptTriggered {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.orange)
+                        Text("Microphone — enable in System Settings")
+                        Spacer()
+                        Button("Open Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+                        }
+                    } else {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.orange)
+                        Text("Microphone access required")
+                        Spacer()
+                        Button("Request") {
+                            triggerMicPermission()
+                        }
+                    }
+                }
+                .onAppear {
+                    micGranted = (AVAudioApplication.shared.recordPermission == .granted)
+                }
+
+                HStack {
+                    if speechStatus == .authorized {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Speech recognition access granted")
+                    } else {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundColor(.orange)
+                        Text("Speech recognition access required")
+                        Spacer()
+                        Button("Request") {
+                            SFSpeechRecognizer.requestAuthorization { status in
+                                DispatchQueue.main.async {
+                                    speechStatus = status
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section("How It Works") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Uses on-device speech recognition", systemImage: "cpu")
+                    Label("Matches your spoken words to the script", systemImage: "text.magnifyingglass")
+                    Label("Scrolls to keep pace with your reading", systemImage: "arrow.down.doc")
+                    Label("Pauses when you pause speaking", systemImage: "pause")
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// Briefly start the audio engine to trigger the macOS mic permission prompt,
+    /// then immediately stop. This registers the app in System Settings > Microphone.
+    private func triggerMicPermission() {
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { _, _ in }
+        engine.prepare()
+        do {
+            try engine.start()
+            // Brief access is enough to trigger the prompt
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+                // Check if permission was granted after the prompt
+                let granted = AVAudioApplication.shared.recordPermission == .granted
+                micGranted = granted
+                if !granted {
+                    micPromptTriggered = true
+                }
+            }
+        } catch {
+            // Engine failed to start — permission was denied or unavailable
+            micPromptTriggered = true
+        }
     }
 }
 

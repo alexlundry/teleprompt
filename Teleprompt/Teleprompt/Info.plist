@@ -6,5 +6,9 @@
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Teleprompt needs accessibility access to enable global keyboard shortcuts for controlling the teleprompter from any application.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Teleprompt needs microphone access for voice tracking, which listens to your speech to automatically scroll the teleprompter.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Teleprompt uses on-device speech recognition to match your spoken words against the script and scroll the teleprompter to follow your pace.</string>
 </dict>
 </plist>
